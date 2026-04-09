@@ -2,6 +2,10 @@
 // API_BASE is set in config.js — GitHub Pages ke liye woh file edit karo
 const API = (typeof API_BASE !== 'undefined' && API_BASE) ? API_BASE.replace(/\/$/, '') : '';
 
+// Direct keys from config.js or localStorage
+const getSKey = () => localStorage.getItem('STABILITY_API_KEY') || (typeof STABILITY_API_KEY !== 'undefined' ? STABILITY_API_KEY : '');
+const getOKey = () => localStorage.getItem('OPENAI_API_KEY') || (typeof OPENAI_API_KEY !== 'undefined' ? OPENAI_API_KEY : '');
+
 // ─── NAVIGATION ──────────────────────────────────────────────────────────────
 function showPage(id) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
@@ -12,6 +16,24 @@ function showPage(id) {
   window.scrollTo(0, 0);
   if (id === 'studio') renderStudioControls();
   if (id === 'chat') { loadConvs(); }
+  if (id === 'settings') { loadSettingsUI(); }
+}
+
+function loadSettingsUI() {
+  document.getElementById('set-skey').value = localStorage.getItem('STABILITY_API_KEY') || '';
+  document.getElementById('set-okey').value = localStorage.getItem('OPENAI_API_KEY') || '';
+}
+
+function saveSettings() {
+  const skey = document.getElementById('set-skey').value.trim();
+  const okey = document.getElementById('set-okey').value.trim();
+  localStorage.setItem('STABILITY_API_KEY', skey);
+  localStorage.setItem('OPENAI_API_KEY', okey);
+
+  const status = document.getElementById('settings-status');
+  status.style.color = '#22c55e';
+  status.textContent = '✅ Settings save ho gayi hain!';
+  setTimeout(() => { status.textContent = ''; }, 3000);
 }
 
 function toggleMobileMenu() {
@@ -50,7 +72,12 @@ function selectTool(tool) {
 function renderStudioControls() {
   const c = document.getElementById('studioControls');
   const t = tools[currentTool];
-  let html = `<div style="margin-bottom:18px"><h3 style="font-size:16px;font-weight:800;margin-bottom:4px">${t.label}</h3></div>`;
+  const sKey = getSKey();
+  const modeTxt = sKey ? 'Direct API 🟢' : 'Backend ☁️';
+  let html = `<div style="margin-bottom:18px">
+    <h3 style="font-size:16px;font-weight:800;margin-bottom:4px">${t.label}</h3>
+    <div style="font-size:10px;color:var(--dim)">Mode: ${modeTxt}</div>
+  </div>`;
 
   if (['img2img','inpaint','sketch','removebg','upscale','style'].includes(currentTool)) {
     html += uploadZone('inputImg', currentTool === 'removebg' ? 'Image (BG hatana hai)' : 'Base Image', 'setInputImg');
@@ -168,6 +195,19 @@ async function generate() {
     body = { imageBase64: inputImgData };
   }
 
+  const sKey = getSKey();
+  if (sKey) {
+    try {
+      const imageUrl = await callStabilityDirect(currentTool, body, sKey);
+      setResult(imageUrl);
+      return;
+    } catch (err) {
+      handleError('Stability API Error: ' + err.message); return;
+    } finally {
+      setLoading(false);
+    }
+  }
+
   try {
     const res = await fetch(API + '/api/images/' + t.endpoint, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
@@ -177,10 +217,83 @@ async function generate() {
     setResult(data.imageUrl);
     loadHistory();
   } catch (err) {
-    alert('Error: ' + err.message);
+    handleError('Error: ' + err.message);
   } finally {
     setLoading(false);
   }
+}
+
+function handleError(msg) {
+  let displayMsg = msg;
+  if (msg.includes('401') || msg.toLowerCase().includes('unauthorized') || msg.toLowerCase().includes('invalid api key')) {
+    displayMsg = '❌ API Key galat hai! Settings mein jaakar sahi key daalein.';
+  } else if (msg.includes('429')) {
+    displayMsg = '⏳ Bahut saare requests! Thodi der baad try karein (Rate Limit).';
+  } else if (msg.includes('Failed to connect') || msg.includes('NetworkError')) {
+    displayMsg = '🌐 Network problem! Check karein ki aapka internet chal raha hai ya API base URL sahi hai.';
+  }
+  alert(displayMsg);
+}
+
+async function callStabilityDirect(tool, body, key) {
+  const fd = new FormData();
+  let url = 'https://api.stability.ai/v2beta/stable-image/generate/core';
+
+  if (tool === 'txt2img') {
+    fd.append('prompt', body.prompt);
+    if (body.negativePrompt) fd.append('negative_prompt', body.negativePrompt);
+    if (body.model === 'stable-image-ultra') url = 'https://api.stability.ai/v2beta/stable-image/generate/ultra';
+  } else if (tool === 'img2img') {
+    url = 'https://api.stability.ai/v2beta/stable-image/generate/sd3';
+    fd.append('image', await base64ToBlob(body.imageBase64));
+    fd.append('prompt', body.prompt);
+    fd.append('strength', body.strength);
+    fd.append('mode', 'image-to-image');
+    fd.append('model', 'sd3');
+  } else if (tool === 'upscale') {
+    url = 'https://api.stability.ai/v2beta/stable-image/upscale/conservative';
+    fd.append('image', await base64ToBlob(body.imageBase64));
+    if (body.prompt) fd.append('prompt', body.prompt);
+  } else if (tool === 'inpaint') {
+    url = 'https://api.stability.ai/v2beta/stable-image/edit/inpaint';
+    fd.append('image', await base64ToBlob(body.imageBase64));
+    fd.append('mask', await base64ToBlob(body.maskBase64));
+    fd.append('prompt', body.prompt);
+  } else if (tool === 'sketch') {
+    url = 'https://api.stability.ai/v2beta/stable-image/control/sketch';
+    fd.append('image', await base64ToBlob(body.imageBase64));
+    fd.append('prompt', body.prompt);
+    fd.append('control_strength', body.controlStrength);
+  } else if (tool === 'style') {
+    url = 'https://api.stability.ai/v2beta/stable-image/control/style';
+    fd.append('image', await base64ToBlob(body.imageBase64));
+    fd.append('style_image', await base64ToBlob(body.styleImageBase64));
+    fd.append('prompt', body.prompt);
+    fd.append('fidelity', body.fidelity);
+  } else if (tool === 'removebg') {
+    url = 'https://api.stability.ai/v2beta/stable-image/edit/remove-background';
+    fd.append('image', await base64ToBlob(body.imageBase64));
+  }
+
+  fd.append('output_format', 'png');
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${key}`, 'Accept': 'application/json' },
+    body: fd
+  });
+
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.errors ? err.errors.join(', ') : err.message || 'API Error');
+  }
+  const data = await res.json();
+  return `data:image/png;base64,${data.image}`;
+}
+
+async function base64ToBlob(b64) {
+  const res = await fetch(b64);
+  return await res.blob();
 }
 
 function setLoading(on) {
@@ -217,6 +330,11 @@ function toggleHistory() {
 }
 
 async function loadHistory() {
+  if (getSKey()) {
+    const grid = document.getElementById('historyGrid');
+    grid.innerHTML = '<p style="color:var(--dim);font-size:12px;padding:12px">Direct API mode mein history save nahi hoti.</p>';
+    return;
+  }
   try {
     const res = await fetch(API + '/api/images/history');
     const data = await res.json();
@@ -349,6 +467,15 @@ function updateMicStatus() {
 }
 
 async function loadConvs() {
+  if (getOKey()) {
+    if (convs.length === 0) {
+      convs = [{ id: 'local', title: 'Local Chat' }];
+      activeConvId = 'local';
+    }
+    renderConvList();
+    renderChatArea();
+    return;
+  }
   try {
     const res = await fetch(API + '/api/openai/conversations');
     convs = await res.json();
@@ -359,6 +486,15 @@ async function loadConvs() {
 }
 
 async function createConv() {
+  if (getOKey()) {
+    const id = Date.now();
+    convs.unshift({ id, title: 'New Chat ' + new Date().toLocaleTimeString() });
+    activeConvId = id;
+    messages = [];
+    renderConvList();
+    renderChatArea();
+    return;
+  }
   try {
     const res = await fetch(API + '/api/openai/conversations', {
       method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({title:'New Conversation'})
@@ -418,12 +554,14 @@ function renderChatArea() {
     return;
   }
   const statusTxt = isStreaming ? 'Soch raha hoon...' : isSpeaking ? 'Bol raha hoon...' : isListening ? 'Sun raha hoon...' : 'Online';
+  const oKey = getOKey();
+  const modeTxt = oKey ? 'Direct' : 'Backend';
   el.innerHTML = `
     <div class="chat-topbar">
       <div class="chat-topbar-info">
         <div class="chat-avatar">🤖</div>
         <div>
-          <div class="chat-name">_technical_01 AI</div>
+          <div class="chat-name">_technical_01 AI <small style="font-size:9px;opacity:0.5">(${modeTxt})</small></div>
           <div class="chat-status" id="chatStatus" style="color:${isSpeaking?'#22c55e':isListening?'#ef4444':isStreaming?'#f97316':'rgba(255,255,255,0.4)'}">${statusTxt}</div>
         </div>
       </div>
@@ -511,15 +649,30 @@ async function sendChatMsg(content) {
   if (!content.trim() || !activeConvId || isStreaming) return;
   addMsg('user', content);
   isStreaming = true;
+  const oKey = getOKey();
   document.getElementById('sendBtn') && (document.getElementById('sendBtn').disabled = true);
   document.getElementById('chatStatus') && (document.getElementById('chatStatus').textContent = 'Soch raha hoon...');
   let fullText = '';
 
   try {
-    const res = await fetch(API + '/api/openai/conversations/' + activeConvId + '/messages', {
-      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({content})
-    });
-    if (!res.ok) throw new Error('Failed');
+    let res;
+    if (oKey) {
+      res = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${oKey}` },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          messages: messages.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content })),
+          stream: true
+        })
+      });
+    } else {
+      res = await fetch(API + '/api/openai/conversations/' + activeConvId + '/messages', {
+        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({content})
+      });
+    }
+
+    if (!res.ok) throw new Error('Failed to connect to AI');
 
     const reader = res.body.getReader();
     const dec = new TextDecoder();
@@ -531,11 +684,14 @@ async function sendChatMsg(content) {
       const lines = buf.split('\n');
       buf = lines.pop() || '';
       for (const line of lines) {
-        if (line.startsWith('data: ')) {
+        let text = line.trim();
+        if (!text) continue;
+        if (text === 'data: [DONE]') break;
+        if (text.startsWith('data: ')) {
           try {
-            const d = JSON.parse(line.slice(6));
-            if (d.content) { fullText += d.content; appendStream(fullText); }
-            if (d.done) break;
+            const d = JSON.parse(text.slice(6));
+            const chunk = oKey ? d.choices[0]?.delta?.content : d.content;
+            if (chunk) { fullText += chunk; appendStream(fullText); }
           } catch(e) {}
         }
       }
@@ -543,11 +699,13 @@ async function sendChatMsg(content) {
     const streamEl = document.getElementById('streamMsg');
     if (streamEl) streamEl.remove();
     if (fullText) { addMsg('assistant', fullText); speak(fullText); }
-    await loadMessages();
+    if (!oKey) await loadMessages();
   } catch(err) {
     const streamEl = document.getElementById('streamMsg');
     if (streamEl) streamEl.remove();
-    addMsg('assistant', 'Error: ' + err.message);
+    let errMsg = err.message;
+    if (errMsg.includes('401')) errMsg = 'API Key galat hai! Settings check karein.';
+    addMsg('assistant', '❌ Error: ' + errMsg);
   } finally {
     isStreaming = false;
     document.getElementById('sendBtn') && (document.getElementById('sendBtn').disabled = false);
