@@ -5,6 +5,10 @@ const API = (typeof API_BASE !== 'undefined' && API_BASE) ? API_BASE.replace(/\/
 // Direct keys from config.js or localStorage
 const getSKey = () => localStorage.getItem('STABILITY_API_KEY') || (typeof STABILITY_API_KEY !== 'undefined' ? STABILITY_API_KEY : '');
 const getOKey = () => localStorage.getItem('OPENAI_API_KEY') || (typeof OPENAI_API_KEY !== 'undefined' ? OPENAI_API_KEY : '');
+const getHKey = () => localStorage.getItem('HUGGINGFACE_API_KEY') || (typeof HUGGINGFACE_API_KEY !== 'undefined' ? HUGGINGFACE_API_KEY : '');
+
+// Check if keys are available
+const hasKeys = () => !!(getSKey() || getOKey() || getHKey());
 
 // ─── NAVIGATION ──────────────────────────────────────────────────────────────
 function showPage(id) {
@@ -22,13 +26,16 @@ function showPage(id) {
 function loadSettingsUI() {
   document.getElementById('set-skey').value = localStorage.getItem('STABILITY_API_KEY') || '';
   document.getElementById('set-okey').value = localStorage.getItem('OPENAI_API_KEY') || '';
+  document.getElementById('set-hkey').value = localStorage.getItem('HUGGINGFACE_API_KEY') || '';
 }
 
 function saveSettings() {
   const skey = document.getElementById('set-skey').value.trim();
   const okey = document.getElementById('set-okey').value.trim();
+  const hkey = document.getElementById('set-hkey').value.trim();
   localStorage.setItem('STABILITY_API_KEY', skey);
   localStorage.setItem('OPENAI_API_KEY', okey);
+  localStorage.setItem('HUGGINGFACE_API_KEY', hkey);
 
   const status = document.getElementById('settings-status');
   status.style.color = '#22c55e';
@@ -73,7 +80,8 @@ function renderStudioControls() {
   const c = document.getElementById('studioControls');
   const t = tools[currentTool];
   const sKey = getSKey();
-  const modeTxt = sKey ? 'Direct API 🟢' : 'Backend ☁️';
+  const hKey = getHKey();
+  const modeTxt = (sKey || hKey) ? 'Direct API 🟢' : 'Backend ☁️';
   let html = `<div style="margin-bottom:18px">
     <h3 style="font-size:16px;font-weight:800;margin-bottom:4px">${t.label}</h3>
     <div style="font-size:10px;color:var(--dim)">Mode: ${modeTxt}</div>
@@ -92,11 +100,28 @@ function renderStudioControls() {
 
   if (currentTool === 'txt2img') {
     html += `<div class="form-group"><label>Negative Prompt</label><input class="form-input" id="s-neg" placeholder="Kya nahi chahiye... (blur, low quality)"/></div>`;
-    html += `<div class="form-group"><label>Model</label><select class="form-input" id="s-model">
-      <option value="stable-image-core">Stable Image Core (Fast ⚡)</option>
-      <option value="stable-image-ultra">Stable Image Ultra (Best ✨)</option>
-      <option value="stable-diffusion-xl-1024-v1-0">SDXL 1.0 (Standard)</option>
+    html += `<div class="form-group"><label>Model Provider</label><select class="form-input" id="s-provider" onchange="renderStudioControls()">
+      <option value="stability" ${localStorage.getItem('lastProvider')==='stability'?'selected':''}>Stability AI</option>
+      <option value="huggingface" ${localStorage.getItem('lastProvider')==='huggingface'?'selected':''}>Hugging Face</option>
     </select></div>`;
+
+    const prov = document.getElementById('s-provider')?.value || localStorage.getItem('lastProvider') || 'stability';
+    localStorage.setItem('lastProvider', prov);
+
+    if (prov === 'stability') {
+      html += `<div class="form-group"><label>Model</label><select class="form-input" id="s-model">
+        <option value="stable-image-core">Stable Image Core (Fast ⚡)</option>
+        <option value="stable-image-ultra">Stable Image Ultra (Best ✨)</option>
+        <option value="sd3">SD 3.5 Large (Stability)</option>
+        <option value="stable-diffusion-xl-1024-v1-0">SDXL 1.0 (Standard)</option>
+      </select></div>`;
+    } else {
+      html += `<div class="form-group"><label>HF Model</label><select class="form-input" id="s-model">
+        <option value="black-forest-labs/FLUX.1-dev">FLUX.1-dev (New 🔥)</option>
+        <option value="stabilityai/stable-diffusion-3.5-large">SD 3.5 Large</option>
+        <option value="stabilityai/stable-diffusion-xl-base-1.0">SDXL 1.0</option>
+      </select></div>`;
+    }
     html += rangeGroup('s-steps', 'Steps', 10, 50, 30, 5);
     html += rangeGroup('s-cfg', 'CFG Scale', 1, 20, 7, 1);
   }
@@ -196,6 +221,21 @@ async function generate() {
   }
 
   const sKey = getSKey();
+  const hKey = getHKey();
+  const provider = document.getElementById('s-provider')?.value || 'stability';
+
+  if (provider === 'huggingface' && hKey) {
+    try {
+      const imageUrl = await callHuggingFaceDirect(body.prompt, document.getElementById('s-model').value, hKey);
+      setResult(imageUrl);
+      return;
+    } catch (err) {
+      handleError('Hugging Face Error: ' + err.message); return;
+    } finally {
+      setLoading(false);
+    }
+  }
+
   if (sKey) {
     try {
       const imageUrl = await callStabilityDirect(currentTool, body, sKey);
@@ -242,7 +282,17 @@ async function callStabilityDirect(tool, body, key) {
   if (tool === 'txt2img') {
     fd.append('prompt', body.prompt);
     if (body.negativePrompt) fd.append('negative_prompt', body.negativePrompt);
-    if (body.model === 'stable-image-ultra') url = 'https://api.stability.ai/v2beta/stable-image/generate/ultra';
+
+    if (body.model === 'stable-image-ultra') {
+        url = 'https://api.stability.ai/v2beta/stable-image/generate/ultra';
+    } else if (body.model === 'sd3') {
+        url = 'https://api.stability.ai/v2beta/stable-image/generate/sd3';
+        fd.append('model', 'sd3.5-large');
+    } else if (body.model === 'stable-diffusion-xl-1024-v1-0') {
+        // SDXL usually requires the SDXL endpoint or core.
+        // Core is a good default, but for specific SDXL 1.0 we might need a different path if available.
+        url = 'https://api.stability.ai/v2beta/stable-image/generate/core';
+    }
   } else if (tool === 'img2img') {
     url = 'https://api.stability.ai/v2beta/stable-image/generate/sd3';
     fd.append('image', await base64ToBlob(body.imageBase64));
@@ -296,6 +346,20 @@ async function base64ToBlob(b64) {
   return await res.blob();
 }
 
+async function callHuggingFaceDirect(prompt, model, key) {
+  const res = await fetch(`https://api-inference.huggingface.co/models/${model}`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ inputs: prompt })
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.error || 'HF API Error');
+  }
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
+}
+
 function setLoading(on) {
   document.getElementById('genBtn').disabled = on;
   document.getElementById('genBtn').textContent = on ? '⏳ Processing...' : '✨ Generate Karo';
@@ -330,7 +394,7 @@ function toggleHistory() {
 }
 
 async function loadHistory() {
-  if (getSKey()) {
+  if (getSKey() || getHKey()) {
     const grid = document.getElementById('historyGrid');
     grid.innerHTML = '<p style="color:var(--dim);font-size:12px;padding:12px">Direct API mode mein history save nahi hoti.</p>';
     return;
