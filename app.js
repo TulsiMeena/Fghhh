@@ -24,9 +24,9 @@ function showPage(id) {
 }
 
 function loadSettingsUI() {
-  document.getElementById('set-skey').value = localStorage.getItem('STABILITY_API_KEY') || '';
-  document.getElementById('set-okey').value = localStorage.getItem('OPENAI_API_KEY') || '';
-  document.getElementById('set-hkey').value = localStorage.getItem('HUGGINGFACE_API_KEY') || '';
+  document.getElementById('set-skey').value = getSKey();
+  document.getElementById('set-okey').value = getOKey();
+  document.getElementById('set-hkey').value = getHKey();
 }
 
 function saveSettings() {
@@ -198,24 +198,26 @@ async function generate() {
   const t = tools[currentTool];
   let body = {};
 
+  const commonParams = {
+    prompt,
+    negativePrompt: document.getElementById('s-neg')?.value || undefined,
+    model: document.getElementById('s-model')?.value || 'stable-image-core',
+    steps: parseInt(document.getElementById('s-steps')?.value || 30),
+    cfgScale: parseInt(document.getElementById('s-cfg')?.value || 7)
+  };
+
   if (currentTool === 'txt2img') {
-    body = {
-      prompt, negativePrompt: document.getElementById('s-neg')?.value || undefined,
-      model: document.getElementById('s-model').value,
-      steps: parseInt(document.getElementById('s-steps')?.value || 30),
-      cfgScale: parseInt(document.getElementById('s-cfg')?.value || 7),
-      width: 1024, height: 1024
-    };
+    body = { ...commonParams, width: 1024, height: 1024 };
   } else if (currentTool === 'img2img') {
-    body = { imageBase64: inputImgData, prompt, strength: parseInt(document.getElementById('s-strength').value)/100 };
+    body = { ...commonParams, imageBase64: inputImgData, strength: parseInt(document.getElementById('s-strength').value)/100 };
   } else if (currentTool === 'upscale') {
-    body = { imageBase64: inputImgData, prompt: prompt || undefined };
+    body = { ...commonParams, imageBase64: inputImgData };
   } else if (currentTool === 'inpaint') {
-    body = { imageBase64: inputImgData, maskBase64: maskImgData, prompt };
+    body = { ...commonParams, imageBase64: inputImgData, maskBase64: maskImgData };
   } else if (currentTool === 'sketch') {
-    body = { imageBase64: inputImgData, prompt, controlStrength: parseInt(document.getElementById('s-ctrl').value)/100 };
+    body = { ...commonParams, imageBase64: inputImgData, controlStrength: parseInt(document.getElementById('s-ctrl').value)/100 };
   } else if (currentTool === 'style') {
-    body = { imageBase64: inputImgData, styleImageBase64: styleImgData, prompt, fidelity: parseInt(document.getElementById('s-fidelity').value)/100 };
+    body = { ...commonParams, imageBase64: inputImgData, styleImageBase64: styleImgData, fidelity: parseInt(document.getElementById('s-fidelity').value)/100 };
   } else if (currentTool === 'removebg') {
     body = { imageBase64: inputImgData };
   }
@@ -224,15 +226,23 @@ async function generate() {
   const hKey = getHKey();
   const provider = document.getElementById('s-provider')?.value || 'stability';
 
-  if (provider === 'huggingface' && hKey) {
-    try {
-      const imageUrl = await callHuggingFaceDirect(body.prompt, document.getElementById('s-model').value, hKey);
-      setResult(imageUrl);
-      return;
-    } catch (err) {
-      handleError('Hugging Face Error: ' + err.message); return;
-    } finally {
-      setLoading(false);
+  if (provider === 'huggingface') {
+    if (hKey) {
+      try {
+        const imageUrl = await callHuggingFaceDirect(body.prompt, document.getElementById('s-model').value, hKey);
+        setResult(imageUrl);
+        return;
+      } catch (err) {
+        handleError('Hugging Face Error: ' + err.message); return;
+      } finally {
+        setLoading(false);
+      }
+    } else if (sKey) {
+        // User selected HF but has no HF key, and we have sKey?
+        // Let's not fall through if provider was explicitly HF.
+        handleError('Hugging Face API Key missing! Settings mein jaakar key daalein.');
+        setLoading(false);
+        return;
     }
   }
 
@@ -264,6 +274,7 @@ async function generate() {
 }
 
 function handleError(msg) {
+  console.error("AI Application Error:", msg);
   let displayMsg = msg;
   if (msg.includes('401') || msg.toLowerCase().includes('unauthorized') || msg.toLowerCase().includes('invalid api key')) {
     displayMsg = '❌ API Key galat hai! Settings mein jaakar sahi key daalein.';
@@ -288,7 +299,8 @@ async function callStabilityDirect(tool, body, key) {
     } else if (body.model === 'sd3') {
         url = 'https://api.stability.ai/v2beta/stable-image/generate/sd3';
         fd.append('model', 'sd3.5-large');
-    } else if (body.model === 'stable-diffusion-xl-1024-v1-0') {
+        fd.append('aspect_ratio', '1:1');
+    } else if (body.model === 'stable-diffusion-xl-1024-v1-0' || body.model === 'stable-image-core') {
         // SDXL usually requires the SDXL endpoint or core.
         // Core is a good default, but for specific SDXL 1.0 we might need a different path if available.
         url = 'https://api.stability.ai/v2beta/stable-image/generate/core';
@@ -299,7 +311,7 @@ async function callStabilityDirect(tool, body, key) {
     fd.append('prompt', body.prompt);
     fd.append('strength', body.strength);
     fd.append('mode', 'image-to-image');
-    fd.append('model', 'sd3');
+    fd.append('model', 'sd3.5-large');
   } else if (tool === 'upscale') {
     url = 'https://api.stability.ai/v2beta/stable-image/upscale/conservative';
     fd.append('image', await base64ToBlob(body.imageBase64));
@@ -334,8 +346,16 @@ async function callStabilityDirect(tool, body, key) {
   });
 
   if (!res.ok) {
-    const err = await res.json();
-    throw new Error(err.errors ? err.errors.join(', ') : err.message || 'API Error');
+    let err;
+    try {
+        err = await res.json();
+        console.error("Stability API Error Response:", err);
+    } catch(e) {
+        const text = await res.text();
+        console.error("Stability API Raw Error:", text);
+        throw new Error(`Stability API Error (${res.status}): ${text.substring(0, 100)}`);
+    }
+    throw new Error(err.errors ? err.errors.join(', ') : err.message || `API Error ${res.status}`);
   }
   const data = await res.json();
   return `data:image/png;base64,${data.image}`;
@@ -347,14 +367,23 @@ async function base64ToBlob(b64) {
 }
 
 async function callHuggingFaceDirect(prompt, model, key) {
-  const res = await fetch(`https://api-inference.huggingface.co/models/${model}`, {
+  // Using newer router endpoint as suggested by HF
+  const res = await fetch(`https://router.huggingface.co/hf-inference/models/${model}`, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ inputs: prompt })
   });
   if (!res.ok) {
-    const err = await res.json();
-    throw new Error(err.error || 'HF API Error');
+    let err;
+    try {
+        err = await res.json();
+        console.error("HF API Error Response:", err);
+    } catch(e) {
+        const text = await res.text();
+        console.error("HF API Raw Error:", text);
+        throw new Error(`HF API Error (${res.status}): ${text.substring(0, 100)}`);
+    }
+    throw new Error(err.error || `HF API Error ${res.status}`);
   }
   const blob = await res.blob();
   return URL.createObjectURL(blob);
@@ -736,7 +765,11 @@ async function sendChatMsg(content) {
       });
     }
 
-    if (!res.ok) throw new Error('Failed to connect to AI');
+    if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        console.error("OpenAI/Chat API Error:", errData);
+        throw new Error(errData.error?.message || `Failed to connect to AI (${res.status})`);
+    }
 
     const reader = res.body.getReader();
     const dec = new TextDecoder();
