@@ -6,6 +6,13 @@
 
 var API_BASE = 'https://your-deployed-backend.replit.app';
 
+// ─── DIRECT API KEYS (Optional) ────────────────────────────────
+// Inhe browser ke localStorage mein save kiya ja sakta hai (Settings se).
+// Security ke liye inhe yahan hardcode na karein.
+var STABILITY_API_KEY = '';
+var OPENAI_API_KEY = '';
+var HUGGINGFACE_API_KEY = '';
+
 // ---------------------------------------------------------------
 //  HOW TO GET YOUR BACKEND URL:
 //  1. Replit mein "Deploy" button dabao (top right)
