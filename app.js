@@ -292,10 +292,13 @@ async function generate() {
 }
 
 function dataURLtoBlob(dataurl) {
-  var arr = dataurl.split(','), mime = arr[0].match(/:(.*?);/)[1],
-      bstr = atob(arr[1]), n = bstr.length, u8arr = new Uint8Array(n);
-  while(n--){ u8arr[n] = bstr.charCodeAt(n); }
-  return new Blob([u8arr], {type:mime});
+  if (!dataurl) return null;
+  try {
+    var arr = dataurl.split(','), mime = arr[0].match(/:(.*?);/)[1],
+        bstr = atob(arr[1]), n = bstr.length, u8arr = new Uint8Array(n);
+    while(n--){ u8arr[n] = bstr.charCodeAt(n); }
+    return new Blob([u8arr], {type:mime});
+  } catch (e) { return null; }
 }
 
 function setLoading(on) {
@@ -630,52 +633,7 @@ async function sendChatMsg(content) {
   document.getElementById('chatStatus') && (document.getElementById('chatStatus').textContent = 'Soch raha hoon...');
   let fullText = '';
 
-  const oKey = getOpenAIKey();
   const hKey = getHFKey();
-
-  if (oKey) {
-    // ─── DIRECT OPENAI MODE ───
-    try {
-      const history = messages.slice(-10).map(m => ({ role: m.role, content: m.content }));
-      const res = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + oKey },
-        body: JSON.stringify({
-          model: 'gpt-4o-mini',
-          messages: [{ role: 'system', content: 'You are _technical_01 AI, a helpful assistant created by Amit Meena for Aman Meena. Respond in Hindi/English mixed (Hinglish).' }, ...history],
-          stream: true
-        })
-      });
-      if (!res.ok) throw new Error('OpenAI Error');
-      const reader = res.body.getReader();
-      const dec = new TextDecoder();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = dec.decode(value);
-        const lines = chunk.split('\n');
-        for (const line of lines) {
-          if (line.startsWith('data: ') && line !== 'data: [DONE]') {
-            try {
-              const d = JSON.parse(line.slice(6));
-              const delta = d.choices[0].delta.content;
-              if (delta) { fullText += delta; appendStream(fullText); }
-            } catch(e) {}
-          }
-        }
-      }
-      const streamEl = document.getElementById('streamMsg');
-      if (streamEl) streamEl.remove();
-      if (fullText) { addMsg('assistant', fullText); speak(fullText); }
-      return;
-    } catch (err) {
-      alert('OpenAI Direct Error: ' + err.message);
-    } finally {
-      isStreaming = false;
-      document.getElementById('sendBtn') && (document.getElementById('sendBtn').disabled = false);
-    }
-    return;
-  }
 
   if (hKey) {
     // ─── DIRECT HUGGING FACE MODE (via router.huggingface.co) ───
@@ -704,45 +662,10 @@ async function sendChatMsg(content) {
     return;
   }
 
-  // ─── PROXY MODE (Original) ───
-  try {
-    const res = await fetch(API + '/api/openai/conversations/' + activeConvId + '/messages', {
-      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({content})
-    });
-    if (!res.ok) throw new Error('Failed');
-
-    const reader = res.body.getReader();
-    const dec = new TextDecoder();
-    let buf = '';
-    while (true) {
-      const {done, value} = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, {stream:true});
-      const lines = buf.split('\n');
-      buf = lines.pop() || '';
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          try {
-            const d = JSON.parse(line.slice(6));
-            if (d.content) { fullText += d.content; appendStream(fullText); }
-            if (d.done) break;
-          } catch(e) {}
-        }
-      }
-    }
-    const streamEl = document.getElementById('streamMsg');
-    if (streamEl) streamEl.remove();
-    if (fullText) { addMsg('assistant', fullText); speak(fullText); }
-    await loadMessages();
-  } catch(err) {
-    const streamEl = document.getElementById('streamMsg');
-    if (streamEl) streamEl.remove();
-    addMsg('assistant', 'Error: ' + err.message);
-  } finally {
-    isStreaming = false;
-    document.getElementById('sendBtn') && (document.getElementById('sendBtn').disabled = false);
-    document.getElementById('chatStatus') && (document.getElementById('chatStatus').textContent = micActive ? (isListening ? 'Sun raha hoon...' : 'Mic ON') : 'Online');
-  }
+  // ─── FALLBACK ───
+  addMsg('assistant', 'Hugging Face API key missing. Settings mein jaakar key dalein.');
+  isStreaming = false;
+  document.getElementById('sendBtn') && (document.getElementById('sendBtn').disabled = false);
 }
 
 // ─── CONTACT ─────────────────────────────────────────────────────────────────
@@ -770,11 +693,9 @@ async function submitContact() {
 // ─── SETTINGS ────────────────────────────────────────────────────────────────
 function saveKeys() {
   const stability = document.getElementById('key-stability').value.trim();
-  const openai = document.getElementById('key-openai').value.trim();
   const huggingface = document.getElementById('key-huggingface').value.trim();
 
   localStorage.setItem('t01_stability_key', stability);
-  localStorage.setItem('t01_openai_key', openai);
   localStorage.setItem('t01_huggingface_key', huggingface);
 
   const btn = document.getElementById('saveKeysBtn');
@@ -789,14 +710,12 @@ function saveKeys() {
 
 function loadKeysToUI() {
   document.getElementById('key-stability').value = localStorage.getItem('t01_stability_key') || '';
-  document.getElementById('key-openai').value = localStorage.getItem('t01_openai_key') || '';
   document.getElementById('key-huggingface').value = localStorage.getItem('t01_huggingface_key') || '';
 }
 
 function clearKeys() {
   if (confirm('Kya aap saari keys delete karna chahte hain?')) {
     localStorage.removeItem('t01_stability_key');
-    localStorage.removeItem('t01_openai_key');
     localStorage.removeItem('t01_huggingface_key');
     loadKeysToUI();
     alert('Saari keys delete ho gayi hain.');
@@ -804,7 +723,6 @@ function clearKeys() {
 }
 
 function getStabilityKey() { return localStorage.getItem('t01_stability_key'); }
-function getOpenAIKey() { return localStorage.getItem('t01_openai_key'); }
 function getHFKey() { return localStorage.getItem('t01_huggingface_key'); }
 
 // ─── INIT ────────────────────────────────────────────────────────────────────
