@@ -662,10 +662,44 @@ async function sendChatMsg(content) {
     return;
   }
 
-  // ─── FALLBACK ───
-  addMsg('assistant', 'Hugging Face API key missing. Settings mein jaakar key dalein.');
-  isStreaming = false;
-  document.getElementById('sendBtn') && (document.getElementById('sendBtn').disabled = false);
+  // ─── PROXY MODE (Original) ───
+  try {
+    const res = await fetch(API + '/api/openai/conversations/' + activeConvId + '/messages', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({content})
+    });
+    if (!res.ok) throw new Error('Proxy mode failed');
+
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream:true});
+      const lines = buf.split('\n');
+      buf = lines.pop() || '';
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const d = JSON.parse(line.slice(6));
+            if (d.content) { fullText += d.content; appendStream(fullText); }
+            if (d.done) break;
+          } catch(e) {}
+        }
+      }
+    }
+    const streamEl = document.getElementById('streamMsg');
+    if (streamEl) streamEl.remove();
+    if (fullText) { addMsg('assistant', fullText); speak(fullText); }
+  } catch(err) {
+    const streamEl = document.getElementById('streamMsg');
+    if (streamEl) streamEl.remove();
+    addMsg('assistant', 'Error: ' + err.message + '. Settings mein jaakar HF Key dalein agar proxy kaam nahi kar raha.');
+  } finally {
+    isStreaming = false;
+    document.getElementById('sendBtn') && (document.getElementById('sendBtn').disabled = false);
+    document.getElementById('chatStatus') && (document.getElementById('chatStatus').textContent = micActive ? (isListening ? 'Sun raha hoon...' : 'Mic ON') : 'Online');
+  }
 }
 
 // ─── CONTACT ─────────────────────────────────────────────────────────────────
