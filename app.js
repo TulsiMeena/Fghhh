@@ -12,6 +12,7 @@ function showPage(id) {
   window.scrollTo(0, 0);
   if (id === 'studio') renderStudioControls();
   if (id === 'chat') { loadConvs(); }
+  if (id === 'settings') { loadKeysToUI(); }
 }
 
 function toggleMobileMenu() {
@@ -68,6 +69,8 @@ function renderStudioControls() {
     html += `<div class="form-group"><label>Model</label><select class="form-input" id="s-model">
       <option value="stable-image-core">Stable Image Core (Fast ⚡)</option>
       <option value="stable-image-ultra">Stable Image Ultra (Best ✨)</option>
+      <option value="sd3.5-large">SD 3.5 Large (Professional)</option>
+      <option value="sd3.5-medium">SD 3.5 Medium</option>
       <option value="stable-diffusion-xl-1024-v1-0">SDXL 1.0 (Standard)</option>
     </select></div>`;
     html += rangeGroup('s-steps', 'Steps', 10, 50, 30, 5);
@@ -144,8 +147,113 @@ async function generate() {
 
   setLoading(true);
   const t = tools[currentTool];
-  let body = {};
+  const sKey = getStabilityKey();
 
+  if (sKey) {
+    // ─── DIRECT API MODE (Stability AI) ───
+    try {
+      const fd = new FormData();
+      let url = 'https://api.stability.ai/v2beta/stable-image/generate/core';
+
+      if (currentTool === 'txt2img') {
+        const model = document.getElementById('s-model').value;
+        if (model === 'stable-image-ultra') {
+          url = 'https://api.stability.ai/v2beta/stable-image/generate/ultra';
+          fd.append('prompt', prompt);
+          const neg = document.getElementById('s-neg')?.value;
+          if (neg) fd.append('negative_prompt', neg);
+          fd.append('aspect_ratio', '1:1');
+          fd.append('output_format', 'webp');
+        } else if (model.startsWith('sd3')) {
+          url = 'https://api.stability.ai/v2beta/stable-image/generate/sd3';
+          fd.append('model', model);
+          fd.append('prompt', prompt);
+          const neg = document.getElementById('s-neg')?.value;
+          if (neg) fd.append('negative_prompt', neg);
+          fd.append('aspect_ratio', '1:1');
+          fd.append('output_format', 'webp');
+        } else if (model.includes('xl')) {
+          // ─── SDXL V1 API ───
+          url = `https://api.stability.ai/v1/generation/${model}/text-to-image`;
+          const sdxlBody = {
+            text_prompts: [{ text: prompt, weight: 1 }],
+            cfg_scale: parseInt(document.getElementById('s-cfg')?.value || 7),
+            steps: parseInt(document.getElementById('s-steps')?.value || 30),
+            width: 1024, height: 1024
+          };
+          const neg = document.getElementById('s-neg')?.value;
+          if (neg) sdxlBody.text_prompts.push({ text: neg, weight: -1 });
+
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + sKey, 'Accept': 'image/png' },
+            body: JSON.stringify(sdxlBody)
+          });
+          if (!res.ok) { const errData = await res.json(); throw new Error(errData.message || 'SDXL failed'); }
+          const blob = await res.blob();
+          setResult(URL.createObjectURL(blob));
+          return;
+        } else {
+          // Default to Core
+          fd.append('prompt', prompt);
+          const neg = document.getElementById('s-neg')?.value;
+          if (neg) fd.append('negative_prompt', neg);
+          fd.append('aspect_ratio', '1:1');
+          fd.append('output_format', 'webp');
+        }
+      } else if (currentTool === 'img2img') {
+        url = 'https://api.stability.ai/v2beta/stable-image/image-to-image';
+        fd.append('image', dataURLtoBlob(inputImgData));
+        fd.append('prompt', prompt);
+        fd.append('strength', (parseInt(document.getElementById('s-strength').value)/100).toString());
+      } else if (currentTool === 'upscale') {
+        url = 'https://api.stability.ai/v2beta/stable-image/upscale/fast';
+        fd.append('image', dataURLtoBlob(inputImgData));
+      } else if (currentTool === 'removebg') {
+        url = 'https://api.stability.ai/v2beta/stable-image/edit/remove-background';
+        fd.append('image', dataURLtoBlob(inputImgData));
+      } else if (currentTool === 'inpaint') {
+        url = 'https://api.stability.ai/v2beta/stable-image/edit/inpaint';
+        fd.append('image', dataURLtoBlob(inputImgData));
+        fd.append('mask', dataURLtoBlob(maskImgData));
+        fd.append('prompt', prompt);
+      } else if (currentTool === 'sketch') {
+        url = 'https://api.stability.ai/v2beta/stable-image/control/sketch';
+        fd.append('image', dataURLtoBlob(inputImgData));
+        fd.append('prompt', prompt);
+        fd.append('control_strength', (parseInt(document.getElementById('s-ctrl').value)/100).toString());
+      } else if (currentTool === 'style') {
+        url = 'https://api.stability.ai/v2beta/stable-image/control/style';
+        fd.append('image', dataURLtoBlob(inputImgData));
+        fd.append('style_image', dataURLtoBlob(styleImgData));
+        fd.append('prompt', prompt);
+        fd.append('fidelity', (parseInt(document.getElementById('s-fidelity').value)/100).toString());
+      }
+
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + sKey, 'Accept': 'image/*' },
+        body: fd
+      });
+
+      if (!res.ok) {
+        const errData = await res.json();
+        throw new Error(errData.errors ? errData.errors[0] : (errData.message || 'Generation failed'));
+      }
+
+      const blob = await res.blob();
+      const imgUrl = URL.createObjectURL(blob);
+      setResult(imgUrl);
+    } catch (err) {
+      alert('Direct API Error: ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+    return;
+  }
+
+  // ─── PROXY MODE (Original) ───
+  let body = {};
   if (currentTool === 'txt2img') {
     body = {
       prompt, negativePrompt: document.getElementById('s-neg')?.value || undefined,
@@ -181,6 +289,13 @@ async function generate() {
   } finally {
     setLoading(false);
   }
+}
+
+function dataURLtoBlob(dataurl) {
+  var arr = dataurl.split(','), mime = arr[0].match(/:(.*?);/)[1],
+      bstr = atob(arr[1]), n = bstr.length, u8arr = new Uint8Array(n);
+  while(n--){ u8arr[n] = bstr.charCodeAt(n); }
+  return new Blob([u8arr], {type:mime});
 }
 
 function setLoading(on) {
@@ -515,6 +630,81 @@ async function sendChatMsg(content) {
   document.getElementById('chatStatus') && (document.getElementById('chatStatus').textContent = 'Soch raha hoon...');
   let fullText = '';
 
+  const oKey = getOpenAIKey();
+  const hKey = getHFKey();
+
+  if (oKey) {
+    // ─── DIRECT OPENAI MODE ───
+    try {
+      const history = messages.slice(-10).map(m => ({ role: m.role, content: m.content }));
+      const res = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + oKey },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          messages: [{ role: 'system', content: 'You are _technical_01 AI, a helpful assistant created by Amit Meena for Aman Meena. Respond in Hindi/English mixed (Hinglish).' }, ...history],
+          stream: true
+        })
+      });
+      if (!res.ok) throw new Error('OpenAI Error');
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = dec.decode(value);
+        const lines = chunk.split('\n');
+        for (const line of lines) {
+          if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+            try {
+              const d = JSON.parse(line.slice(6));
+              const delta = d.choices[0].delta.content;
+              if (delta) { fullText += delta; appendStream(fullText); }
+            } catch(e) {}
+          }
+        }
+      }
+      const streamEl = document.getElementById('streamMsg');
+      if (streamEl) streamEl.remove();
+      if (fullText) { addMsg('assistant', fullText); speak(fullText); }
+      return;
+    } catch (err) {
+      alert('OpenAI Direct Error: ' + err.message);
+    } finally {
+      isStreaming = false;
+      document.getElementById('sendBtn') && (document.getElementById('sendBtn').disabled = false);
+    }
+    return;
+  }
+
+  if (hKey) {
+    // ─── DIRECT HUGGING FACE MODE (via router.huggingface.co) ───
+    try {
+      const res = await fetch('https://router.huggingface.co/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + hKey },
+        body: JSON.stringify({
+          model: 'meta-llama/Llama-3.1-8B-Instruct',
+          messages: [{ role: 'system', content: 'You are _technical_01 AI, helpful assistant. Use Hindi/English.' }, { role: 'user', content }],
+          max_tokens: 500
+        })
+      });
+      if (!res.ok) throw new Error('HF Error');
+      const data = await res.json();
+      fullText = data.choices[0].message.content;
+      addMsg('assistant', fullText);
+      speak(fullText);
+      return;
+    } catch (err) {
+      alert('HF Direct Error: ' + err.message);
+    } finally {
+      isStreaming = false;
+      document.getElementById('sendBtn') && (document.getElementById('sendBtn').disabled = false);
+    }
+    return;
+  }
+
+  // ─── PROXY MODE (Original) ───
   try {
     const res = await fetch(API + '/api/openai/conversations/' + activeConvId + '/messages', {
       method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({content})
@@ -576,6 +766,46 @@ async function submitContact() {
     } else { btn.disabled=false; btn.textContent='📤 Message Bhejein'; alert('Error! Dobara try karein.'); }
   } catch(e) { btn.disabled=false; btn.textContent='📤 Message Bhejein'; alert('Network error! Dobara try karein.'); }
 }
+
+// ─── SETTINGS ────────────────────────────────────────────────────────────────
+function saveKeys() {
+  const stability = document.getElementById('key-stability').value.trim();
+  const openai = document.getElementById('key-openai').value.trim();
+  const huggingface = document.getElementById('key-huggingface').value.trim();
+
+  localStorage.setItem('t01_stability_key', stability);
+  localStorage.setItem('t01_openai_key', openai);
+  localStorage.setItem('t01_huggingface_key', huggingface);
+
+  const btn = document.getElementById('saveKeysBtn');
+  const oldTxt = btn.textContent;
+  btn.textContent = '✅ Settings Saved!';
+  btn.style.background = 'var(--green)';
+  setTimeout(() => {
+    btn.textContent = oldTxt;
+    btn.style.background = '';
+  }, 2000);
+}
+
+function loadKeysToUI() {
+  document.getElementById('key-stability').value = localStorage.getItem('t01_stability_key') || '';
+  document.getElementById('key-openai').value = localStorage.getItem('t01_openai_key') || '';
+  document.getElementById('key-huggingface').value = localStorage.getItem('t01_huggingface_key') || '';
+}
+
+function clearKeys() {
+  if (confirm('Kya aap saari keys delete karna chahte hain?')) {
+    localStorage.removeItem('t01_stability_key');
+    localStorage.removeItem('t01_openai_key');
+    localStorage.removeItem('t01_huggingface_key');
+    loadKeysToUI();
+    alert('Saari keys delete ho gayi hain.');
+  }
+}
+
+function getStabilityKey() { return localStorage.getItem('t01_stability_key'); }
+function getOpenAIKey() { return localStorage.getItem('t01_openai_key'); }
+function getHFKey() { return localStorage.getItem('t01_huggingface_key'); }
 
 // ─── INIT ────────────────────────────────────────────────────────────────────
 renderStudioControls();

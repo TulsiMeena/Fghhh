@@ -240,6 +240,14 @@ input[type=range]{width:100%;accent-color:#f97316;height:4px}
 .privacy-section-header{display:flex;align-items:center;gap:10px;margin-bottom:10px;font-size:15px;font-weight:800}
 .privacy-section p{font-size:13px;color:var(--muted);line-height:1.8}
 
+/* SETTINGS PAGE */
+.settings-page{max-width:900px;margin:0 auto;padding:40px 24px}
+.settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px}
+
+@media(max-width:800px){
+  .settings-grid{grid-template-columns:1fr}
+}
+
 /* CONTACT */
 .contact-page{max-width:900px;margin:0 auto;padding:40px 24px}
 .contact-grid{display:grid;grid-template-columns:1fr 2fr;gap:24px}
